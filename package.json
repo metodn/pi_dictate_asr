@@ -1,0 +1,15 @@
+{
+  "name": "pi-dictate-asr",
+  "version": "0.1.0",
+  "description": "Local, private hold-Space dictation for the pi coding agent, transcribed by an audio model served through llama-swap.",
+  "license": "MIT",
+  "keywords": ["pi-package", "speech-to-text", "dictation", "voice", "llama-swap"],
+  "repository": { "type": "git", "url": "git+https://github.com/metodn/pi_dictate_asr.git" },
+  "pi": {
+    "extensions": ["./extensions/pi-dictate-asr.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

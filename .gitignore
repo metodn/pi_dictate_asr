@@ -1,0 +1,7 @@
+# local scratch and noise
+_tmp_test/
+node_modules/
+*.log
+.DS_Store
+*~
+*.swp

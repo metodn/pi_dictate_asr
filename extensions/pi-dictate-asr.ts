@@ -14,10 +14,11 @@
  *   local  http://localhost:8181   lfm3-audio-2b
  * With several, the active one is tried first and the others are tried when it fails.
  *
- *   /dictate        switch Space-hold dictation on or off
- *   /dictate info   (any argument) servers and state, changes nothing
- *   /asr            list servers with reachability
- *   /asr use <name> make a server the active one (saved)
+ *   /dictate                    switch Space-hold dictation on or off
+ *   /dictate info               (any other argument) servers and state, changes nothing
+ *   /dictate use <name>         make a server the active one (saved)
+ *   /dictate add <name> <host[:port]|url> [model]   add a server (saved; model defaults to lfm3-audio-2b)
+ *   /dictate remove <name>      drop a server (saved)
  *
  * Try without installing:  pi --no-extensions -e ./extensions/pi-dictate-asr.ts
  */
@@ -414,14 +415,15 @@ export default function (pi: ExtensionAPI) {
 					},
 					() => "down",
 				);
-				return `${s.name === cfg.active ? "*" : " "} ${s.name.padEnd(8)} ${s.url}  ${s.model}  [${state}]`;
+				return [`${s.name === cfg.active ? "*" : " "} ${s.name.padEnd(8)} ${s.url}  ${s.model}  [${state}]`, `/dictate use ${s.name}`];
 			}),
 		);
-		return rows.join("\n");
+		const w = Math.max(...rows.map((r) => r[0].length));
+		return rows.map(([info, hint]) => `${info.padEnd(w)}  |  ${hint}`).join("\n");
 	}
 
-	pi.registerCommand("asr", {
-		description: "List dictation servers, or `/asr use <name>` to switch",
+	pi.registerCommand("dictate", {
+		description: "Switch hold-Space dictation on/off. Arguments: info | use <name> | add <name> <host[:port]> [model] | remove <name>",
 		handler: async (args, ctx) => {
 			const [verb, name] = (args ?? "").trim().split(/\s+/);
 			if (verb === "use") {
@@ -435,13 +437,32 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`asr: using ${name}`, "info");
 				return;
 			}
-			ctx.ui.notify(await serverReport(), "info");
-		},
-	});
-
-	pi.registerCommand("dictate", {
-		description: "Switch hold-Space dictation on/off. With an argument (e.g. info): show servers and state",
-		handler: async (args, ctx) => {
+			if (verb === "add") {
+				const [, , addr, model] = (args ?? "").trim().split(/\s+/);
+				if (!name || !addr) {
+					ctx.ui.notify("usage: /dictate add <name> <host[:port]|url> [model]", "error");
+					return;
+				}
+				const url = (/^https?:\/\//.test(addr) ? addr : `http://${addr}`).replace(/\/+$/, "");
+				const entry = { name, url, model: model ?? DEFAULTS.servers[0].model };
+				const i = cfg.servers.findIndex((s) => s.name === name);
+				if (i >= 0) cfg.servers[i] = entry;
+				else cfg.servers.push(entry);
+				saveConfig(cfg);
+				ctx.ui.notify(`asr: ${i >= 0 ? "updated" : "added"} ${name} (${url}, ${entry.model})\n${await serverReport()}`, "info");
+				return;
+			}
+			if (verb === "remove") {
+				if (cfg.servers.length < 2 || !cfg.servers.some((s) => s.name === name)) {
+					ctx.ui.notify(`asr: cannot remove "${name}" (unknown, or the only server)`, "error");
+					return;
+				}
+				cfg.servers = cfg.servers.filter((s) => s.name !== name);
+				if (cfg.active === name) cfg.active = cfg.servers[0].name;
+				saveConfig(cfg);
+				ctx.ui.notify(`asr: removed ${name}; active: ${cfg.active}`, "info");
+				return;
+			}
 			if ((args ?? "").trim()) {
 				ctx.ui.notify(`dictation: ${enabled ? "ON (hold Space)" : "off"}\n${await serverReport()}`, "info");
 				return;

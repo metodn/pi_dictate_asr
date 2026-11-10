@@ -58,8 +58,9 @@ To remove it: `pi remove git:github.com/metodn/pi_dictate_asr` (or delete the co
 | --- | --- |
 | `/dictate` | Switch dictation on or off. It is **off at the start of every session**, so Space types normally until you run it. |
 | `/dictate info` (any argument) | Show whether dictation is on, and the configured servers with whether each is reachable and serves the model. Changes nothing. |
-| `/asr` | List the servers. |
-| `/asr use <name>` | Make a server the active one (saved in `~/.pi/agent/pi-dictate-asr.json`). |
+| `/dictate use <name>` | Make a server the active one (saved in `~/.pi/agent/pi-dictate-asr.json`). |
+| `/dictate add <name> <host[:port]\|url> [model]` | Add (or update) a server, saved to the config file. Model defaults to `lfm3-audio-2b`. |
+| `/dictate remove <name>` | Remove a server (the last one cannot be removed). |
 
 With dictation on:
 
@@ -80,7 +81,7 @@ Without a config file there is one server, `local` at `http://localhost:8181` us
   "active": "local",
   "servers": [
     { "name": "local", "url": "http://localhost:8181", "model": "lfm3-audio-2b" },
-    { "name": "desk", "url": "http://192.168.1.50:8181", "model": "lfm3-audio-2b" }
+    { "name": "desk", "url": "http://desk.local:8181", "model": "lfm3-audio-2b" }
   ]
 }
 ```

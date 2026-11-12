@@ -66,7 +66,7 @@ To remove it: `pi remove git:github.com/metodn/pi_dictate_asr` (or `pi remove ./
 | `/dictate help` | Show the keys and commands. |
 | `/dictate info` | Show the same server list without switching anything. |
 | `/dictate use <name>` | Make a server the active one (saved in `~/.pi/agent/pi-dictate-asr.json`). |
-| `/dictate add <name> <host[:port]\|url> [model]` | Add (or update) a server, saved to the config file. Model defaults to `lfm3-audio-2b`. |
+| `/dictate add <name> <host[:port]\|url> [model] [key=<API key>]` | Add (or update) a server, saved to the config file. Model defaults to `lfm3-audio-2b`. `key=` is for a server that requires an API key; re-adding without `key=` keeps the saved key. |
 | `/dictate remove <name>` | Remove a server (the last one cannot be removed). |
 
 With dictation on:
@@ -101,6 +101,10 @@ Without a config file there is one server, `local` at `http://localhost:8181` us
 
 - The `active` server is tried first. If a request to it fails (connection error or an HTTP error),
   the others are tried in order, and the footer shows `asr: desk (fallback, local failed)`.
+- `apiKey` (optional, per server) is sent as `Authorization: Bearer <apiKey>`, for a llama-swap or proxy
+  that requires a key. The server list shows `(key)` for such a server, `[needs an API key]` when one
+  is required but missing, and `[API key rejected]` when it is wrong. The file is stored with mode 600;
+  keys are kept in plain text, so do not commit or share it.
 - `model` is the model name sent in the request. Use the name your server exposes.
 - `/dictate info` shows `[ready]` for a server that lists its model in `/v1/models`, `[model not
   listed]` for one that is up but does not, and `[down]` for one that does not answer.

@@ -19,20 +19,20 @@
  *   /dictate help               keys and commands
  *   /dictate info               (any other argument) servers and state, changes nothing
  *   /dictate use <name>         make a server the active one (saved)
- *   /dictate add <name> <host[:port]|url> [model]   add a server (saved; model defaults to lfm3-audio-2b)
+ *   /dictate add <name> <host[:port]|url> [model] [key=<API key>]   add a server (saved; model defaults to lfm3-audio-2b)
  *   /dictate remove <name>      drop a server (saved)
  *
  * Try without installing:  pi --no-extensions -e ./extensions/pi-dictate-asr.ts
  */
 import { type ChildProcess } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isSilent, pickRecorder, startCapture } from "../src/recorder.ts";
 
-type Server = { name: string; url: string; model: string };
+type Server = { name: string; url: string; model: string; apiKey?: string };
 type Config = { servers: Server[]; active: string };
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictate-asr.json");
@@ -61,7 +61,10 @@ function loadConfig(): Config {
 
 function saveConfig(c: Config): void {
 	mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-	writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2) + "\n");
+	writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 }); // may hold API keys
+	try {
+		chmodSync(CONFIG_PATH, 0o600); // also for a file created earlier with looser rights
+	} catch {}
 }
 
 // ------------------------------------------------------------------ audio + decode
@@ -109,10 +112,13 @@ function wav(pcm: Buffer): Buffer {
 	return Buffer.concat([h, pcm]);
 }
 
+/** Request headers for a server; adds the bearer token when the server has an apiKey. */
+const authHeaders = (s: Server): Record<string, string> => (s.apiKey ? { Authorization: `Bearer ${s.apiKey}` } : {});
+
 async function decodeWith(s: Server, pcm: Buffer): Promise<string> {
 	const res = await fetch(`${s.url}/v1/chat/completions`, {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
+		headers: { "Content-Type": "application/json", ...authHeaders(s) },
 		signal: AbortSignal.timeout(60_000),
 		body: JSON.stringify({
 			model: s.model,
@@ -438,15 +444,16 @@ export default function (pi: ExtensionAPI) {
 		const rows = await Promise.all(
 			cfg.servers.map(async (s) => {
 				// Ask the server which models it serves: that tells "listening" from "has no such API/model".
-				const state = await fetch(`${s.url}/v1/models`, { signal: AbortSignal.timeout(2500) }).then(
+				const state = await fetch(`${s.url}/v1/models`, { headers: authHeaders(s), signal: AbortSignal.timeout(2500) }).then(
 					async (r) => {
+						if (r.status === 401 || r.status === 403) return s.apiKey ? "API key rejected" : "needs an API key";
 						if (!r.ok) return "no models API yet";
 						const j = (await r.json().catch(() => ({}))) as { data?: { id: string }[] };
 						return j.data?.some((m) => m.id === s.model) ? "ready" : "model not listed";
 					},
 					() => "down",
 				);
-				return [`${s.name === cfg.active ? "*" : " "} ${s.name.padEnd(8)} ${s.url}  ${s.model}  [${state}]`, `/dictate use ${s.name}`];
+				return [`${s.name === cfg.active ? "*" : " "} ${s.name.padEnd(8)} ${s.url}  ${s.model}${s.apiKey ? "  (key)" : ""}  [${state}]`, `/dictate use ${s.name}`];
 			}),
 		);
 		const w = Math.max(...rows.map((r) => r[0].length));
@@ -462,13 +469,14 @@ export default function (pi: ExtensionAPI) {
 		"  /dictate               switch dictation on or off (off at each start)",
 		"  /dictate info          state and servers, with [ready] / [down]",
 		"  /dictate use <name>    choose the server tried first; the others are fallbacks",
-		"  /dictate add <name> <host[:port]|url> [model]    /dictate remove <name>",
+		"  /dictate add <name> <host[:port]|url> [model] [key=<API key>]    /dictate remove <name>",
+		"  A server behind an API key: add key=<token>, or set \"apiKey\" in the config file (sent as a Bearer token).",
 		"  Status bar: asr: <server> (fallback = the active one failed).",
 		"  No sound or only silence: check the recording tool (parecord or sox) and the terminal's microphone permission.",
 	].join("\n");
 
 	pi.registerCommand("dictate", {
-		description: "Dictation on/off (hold Space, or Ctrl+R hands-free). Arguments: help | info | use <name> | add <name> <host[:port]> [model] | remove <name>",
+		description: "Dictation on/off (hold Space, or Ctrl+R hands-free). Arguments: help | info | use <name> | add <name> <host[:port]> [model] [key=<token>] | remove <name>",
 		handler: async (args, ctx) => {
 			const [verb, name] = (args ?? "").trim().split(/\s+/);
 			if (verb === "help") {
@@ -487,14 +495,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (verb === "add") {
-				const [, , addr, model] = (args ?? "").trim().split(/\s+/);
+				const [, , addr, ...rest] = (args ?? "").trim().split(/\s+/);
 				if (!name || !addr) {
-					ctx.ui.notify("usage: /dictate add <name> <host[:port]|url> [model]", "error");
+					ctx.ui.notify("usage: /dictate add <name> <host[:port]|url> [model] [key=<API key>]", "error");
 					return;
 				}
+				const model = rest.find((t) => !t.startsWith("key="));
+				const keyArg = rest.find((t) => t.startsWith("key="))?.slice(4);
 				const url = (/^https?:\/\//.test(addr) ? addr : `http://${addr}`).replace(/\/+$/, "");
-				const entry = { name, url, model: model ?? DEFAULTS.servers[0].model };
 				const i = cfg.servers.findIndex((s) => s.name === name);
+				const apiKey = keyArg ?? (i >= 0 ? cfg.servers[i].apiKey : undefined); // re-adding keeps the saved key
+				const entry: Server = { name, url, model: model ?? DEFAULTS.servers[0].model, ...(apiKey ? { apiKey } : {}) };
 				if (i >= 0) cfg.servers[i] = entry;
 				else cfg.servers.push(entry);
 				saveConfig(cfg);

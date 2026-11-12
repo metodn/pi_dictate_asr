@@ -2,11 +2,12 @@
  * pi-dictate-asr: minimal hold-Space dictation for pi.
  *
  * Run /dictate to switch dictation on (again to switch it off; it is off at the start of each session).
- * Then hold Space (about half a second until key-repeat starts), speak, release. The words you say are
+ * Then hold Space (about half a second until key-repeat starts), speak, release. For hands-free
+ * recording press Ctrl+R, speak (switch windows if you like), and press Ctrl+R or Enter to finish. The words you say are
  * typed into the prompt at the caret while you talk (start, middle or end of existing text) and
  * settle when you let go. Esc or Ctrl+C while holding removes them. A single Space still types a space.
  *
- * Audio is recorded with `parecord` and sent as `input_audio` to an OpenAI-style
+ * Audio is recorded with `parecord` (Linux) or `sox` (macOS, Windows; see src/recorder.ts) and sent as `input_audio` to an OpenAI-style
  * /v1/chat/completions endpoint (llama-swap serving an LFM3-Audio model). No other server is
  * needed. Each decode re-sends the growing audio, so the text refines as you speak.
  *
@@ -15,6 +16,7 @@
  * With several, the active one is tried first and the others are tried when it fails.
  *
  *   /dictate                    switch Space-hold dictation on or off
+ *   /dictate help               keys and commands
  *   /dictate info               (any other argument) servers and state, changes nothing
  *   /dictate use <name>         make a server the active one (saved)
  *   /dictate add <name> <host[:port]|url> [model]   add a server (saved; model defaults to lfm3-audio-2b)
@@ -22,12 +24,13 @@
  *
  * Try without installing:  pi --no-extensions -e ./extensions/pi-dictate-asr.ts
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { isSilent, pickRecorder, startCapture } from "../src/recorder.ts";
 
 type Server = { name: string; url: string; model: string };
 type Config = { servers: Server[]; active: string };
@@ -44,6 +47,7 @@ const STEP_BYTES = 32000; // re-decode after this much new audio (1 s of 16 kHz 
 const MIN_BYTES = 9600; // 0.3 s
 const SEGMENT_BYTES = 32000 * 40; // commit the text so far every 40 s (models take clips up to ~60 s)
 const WIDGET = "pi-dictate-asr";
+const TOGGLE_KEY = "ctrl+r"; // hands-free recording on/off (unused by pi's editor)
 
 function loadConfig(): Config {
 	try {
@@ -160,6 +164,7 @@ export default function (pi: ExtensionAPI) {
 	let spaceRun = 0; // spaces typed so far in this chain
 	let lastSpaceAt = 0;
 	let isHeld = false;
+	let latched = false; // hands-free recording: started with Ctrl+R, ended with Ctrl+R or Enter
 	let releaseTimer: ReturnType<typeof setInterval> | undefined;
 
 	const ordered = (): Server[] => {
@@ -188,7 +193,7 @@ export default function (pi: ExtensionAPI) {
 	/** Footer indicator only; the words themselves go into the prompt. */
 	function indicator(ctx: ExtensionContext, state: "rec" | "wait" | "off"): void {
 		const t = ctx.ui.theme;
-		if (state === "rec") ctx.ui.setStatus(WIDGET, t.fg("error", "● REC") + t.fg("dim", " release Space, Esc cancels"));
+		if (state === "rec") ctx.ui.setStatus(WIDGET, t.fg("error", "● REC") + t.fg("dim", latched ? " Ctrl+R or Enter to finish, Esc cancels" : " release Space, Esc cancels"));
 		else if (state === "wait") ctx.ui.setStatus(WIDGET, t.fg("warning", "◌ transcribing…"));
 		else if (!enabled) ctx.ui.setStatus(WIDGET, undefined);
 		else ctx.ui.setStatus(WIDGET, lastUsed && lastUsed !== cfg.active ? `asr: ${lastUsed} (fallback, ${cfg.active} failed)` : `asr: ${cfg.active}`);
@@ -274,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 		requestRender?.();
 	}
 
-	function startRecording(ctx: ExtensionContext): void {
+	function startRecording(ctx: ExtensionContext): boolean {
 		pcm = [];
 		bytes = 0;
 		segStart = 0;
@@ -282,15 +287,18 @@ export default function (pi: ExtensionAPI) {
 		segText = "";
 		decodedBytes = 0;
 		discarded = false;
+		const picked = pickRecorder();
+		if ("error" in picked) {
+			ctx.ui.notify(`asr: ${picked.error}`, "error");
+			return false;
+		}
 		beginLive();
-		rec = spawn("parecord", ["--raw", "--latency-msec=30", "--channels=1", "--rate=16000", "--format=s16le"], {
-			stdio: ["ignore", "pipe", "ignore"],
-		});
+		rec = startCapture(picked.backend);
 		rec.stdout?.on("data", (d: Buffer) => {
 			pcm.push(d);
 			bytes += d.length;
 		});
-		rec.on("error", (e) => ctx.ui.notify(`asr: cannot record (${e.message}). Is parecord installed?`, "error"));
+		rec.on("error", (e) => ctx.ui.notify(`asr: cannot record with ${picked.backend.cmd} (${e.message})`, "error"));
 		indicator(ctx, "rec");
 		ticker = setInterval(() => {
 			if (decoding || bytes - decodedBytes < STEP_BYTES) return;
@@ -299,6 +307,7 @@ export default function (pi: ExtensionAPI) {
 				.catch((e) => ctx.ui.notify(`asr: ${e.message}`, "error"))
 				.finally(() => (decoding = false));
 		}, 200);
+		return true;
 	}
 
 	async function stopRecording(ctx: ExtensionContext, discard: boolean): Promise<void> {
@@ -324,7 +333,12 @@ export default function (pi: ExtensionAPI) {
 			const final = transcript();
 			if (!final) {
 				setLive("");
-				ctx.ui.notify("asr: no speech heard", "info");
+				ctx.ui.notify(
+					isSilent(audioNow())
+						? "asr: the microphone delivered only silence. Check the microphone permission of this terminal."
+						: "asr: no speech heard",
+					"info",
+				);
 			} else if (live && !live.abandoned) {
 				setLive(final);
 				if (live.abandoned) insertAtCaret(ctx, final);
@@ -344,12 +358,29 @@ export default function (pi: ExtensionAPI) {
 	function onInput(ctx: ExtensionContext) {
 		return (data: string): { consume?: boolean } | undefined => {
 			if (!enabled) return undefined;
-			if (isHeld && (data === "\x1b" || data === "\x03")) {
+			if (!isHeld && matchesKey(data, TOGGLE_KEY)) {
+				if (latched) {
+					latched = false;
+					void stopRecording(ctx, false);
+				} else if (!rec) {
+					latched = true; // before starting, so the status line shows the right hint
+					latched = startRecording(ctx);
+				}
+				return { consume: true };
+			}
+			if (latched && matchesKey(data, "enter")) {
+				latched = false;
+				void stopRecording(ctx, false);
+				return { consume: true };
+			}
+			if ((isHeld || latched) && (data === "\x1b" || data === "\x03")) {
 				isHeld = false;
+				latched = false;
 				if (releaseTimer) clearInterval(releaseTimer);
 				void stopRecording(ctx, true);
 				return { consume: true };
 			}
+			if (latched) return undefined; // spaces are ordinary typing during a hands-free recording
 			const isSpace = data === " " || /^ {2,}$/.test(data) || data === "\x1b[32u";
 			if (!isSpace) {
 				spaceRun = 0;
@@ -422,10 +453,28 @@ export default function (pi: ExtensionAPI) {
 		return rows.map(([info, hint]) => `${info.padEnd(w)}  |  ${hint}`).join("\n");
 	}
 
+	const HELP = [
+		"dictation (pi-dictate-asr)",
+		"  Hold Space      speak while held, release to finish. Words appear at the caret.",
+		"  Ctrl+R          hands-free: start recording, switch windows, come back, press Ctrl+R or Enter to finish.",
+		"  Esc / Ctrl+C    cancel the running recording and remove its words.",
+		"  Typing in the prompt while a recording runs stops the live update; the words are then inserted at the caret when you finish.",
+		"  /dictate               switch dictation on or off (off at each start)",
+		"  /dictate info          state and servers, with [ready] / [down]",
+		"  /dictate use <name>    choose the server tried first; the others are fallbacks",
+		"  /dictate add <name> <host[:port]|url> [model]    /dictate remove <name>",
+		"  Status bar: asr: <server> (fallback = the active one failed).",
+		"  No sound or only silence: check the recording tool (parecord or sox) and the terminal's microphone permission.",
+	].join("\n");
+
 	pi.registerCommand("dictate", {
-		description: "Switch hold-Space dictation on/off. Arguments: info | use <name> | add <name> <host[:port]> [model] | remove <name>",
+		description: "Dictation on/off (hold Space, or Ctrl+R hands-free). Arguments: help | info | use <name> | add <name> <host[:port]> [model] | remove <name>",
 		handler: async (args, ctx) => {
 			const [verb, name] = (args ?? "").trim().split(/\s+/);
+			if (verb === "help") {
+				ctx.ui.notify(HELP, "info");
+				return;
+			}
 			if (verb === "use") {
 				if (!cfg.servers.some((s) => s.name === name)) {
 					ctx.ui.notify(`asr: no server "${name}". Known: ${cfg.servers.map((s) => s.name).join(", ")}`, "error");
@@ -470,13 +519,15 @@ export default function (pi: ExtensionAPI) {
 			enabled = !enabled;
 			if (!enabled && rec) {
 				isHeld = false;
+				latched = false;
 				if (releaseTimer) clearInterval(releaseTimer);
 				await stopRecording(ctx, true);
 			}
 			spaceRun = 0;
 			indicator(ctx, "off");
 			ctx.ui.notify(
-				enabled ? `dictation ON: hold Space and speak (server: ${cfg.active}). /dictate again to switch it off.` : "dictation off: Space types normally again.",
+				(enabled ? "dictation ON: hold Space and speak, or Ctrl+R for hands-free. /dictate help for more, /dictate again to switch off." : "dictation off: Space types normally again.") +
+					`\nservers (* = active):\n${await serverReport()}`,
 				"info",
 			);
 		},

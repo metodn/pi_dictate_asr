@@ -2,16 +2,22 @@
 
 Local, private dictation for the pi coding agent. Run
 `/dictate` once, then hold **Space**, speak, and release: the words are typed into the prompt at the
-caret while you talk and settle when you let go. Speech is transcribed by an audio model served by
+caret while you talk and settle when you let go. For longer pauses or reading in another window,
+press **Ctrl+R** to record hands-free and **Ctrl+R** or **Enter** to finish. Speech is transcribed by an audio model served by
 [llama-swap](https://github.com/mostlygeek/llama-swap) on your own machine, so no audio goes to a
 cloud service.
 
-It is a single pi extension, about 463 lines of TypeScript, with no dependencies of its own.
+It is a small pi extension (one main file plus a recorder module, about 600 lines of TypeScript) with no dependencies of its own.
 
 ## Requirements
 
 - **pi** (developed and tested on 1.5.0, Linux).
-- **PulseAudio or PipeWire** with `parecord` on the PATH, and a working microphone.
+- **A recording tool on the PATH** and a working microphone (picked automatically, see `src/recorder.ts`):
+  - Linux: `parecord` (PulseAudio or PipeWire), else `sox`, else `arecord`.
+  - macOS: `brew install sox`. Give your terminal app microphone permission (System Settings >
+    Privacy & Security > Microphone); without it the recording is silent and the extension says so.
+  - Windows: `winget install ChrisBagwell.SoX` (or `choco install sox.portable`). macOS and Windows are
+    not yet tested with this extension.
 - **A llama-swap server** (default `http://localhost:8181`) that serves an audio-input chat model
   through `/v1/chat/completions` with `input_audio` content. The default model name is
   `lfm3-audio-2b` (LFM3-Audio served by llama.cpp); any model that transcribes `input_audio` works,
@@ -36,28 +42,29 @@ Pin a release instead by adding a tag: `pi install git:github.com/metodn/pi_dict
 pi -e git:github.com/metodn/pi_dictate_asr
 ```
 
-**Manual copy.** Put the single file where pi discovers extensions:
+**From a local clone** (edits take effect on the next pi start):
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-curl -fsSL https://raw.githubusercontent.com/metodn/pi_dictate_asr/main/extensions/pi-dictate-asr.ts \
-  -o ~/.pi/agent/extensions/pi-dictate-asr.ts
+git clone https://github.com/metodn/pi_dictate_asr.git
+pi install ./pi_dictate_asr
 ```
 
-Then restart pi, or run `/reload`.
+The extension needs `src/recorder.ts` next to `extensions/`, so copying only the one `.ts` file does
+not work. Restart pi, or run `/reload`, after installing.
 
 **Conflicts:** another extension that also reacts to the Space key (for example a different
 dictation extension) will fight with this one. Disable it with `pi config`, or load only this one
 for a session with `pi --no-extensions -e git:github.com/metodn/pi_dictate_asr`.
 
-To remove it: `pi remove git:github.com/metodn/pi_dictate_asr` (or delete the copied file).
+To remove it: `pi remove git:github.com/metodn/pi_dictate_asr` (or `pi remove ./pi_dictate_asr` for a local clone).
 
 ## Use
 
 | Command | What it does |
 | --- | --- |
-| `/dictate` | Switch dictation on or off. It is **off at the start of every session**, so Space types normally until you run it. |
-| `/dictate info` (any argument) | Show whether dictation is on, and the configured servers with whether each is reachable and serves the model. Changes nothing. |
+| `/dictate` | Switch dictation on or off, and list the servers (`*` marks the active one, with `[ready]` / `[down]` and the command to switch to each). It is **off at the start of every session**, so Space types normally until you run it. |
+| `/dictate help` | Show the keys and commands. |
+| `/dictate info` | Show the same server list without switching anything. |
 | `/dictate use <name>` | Make a server the active one (saved in `~/.pi/agent/pi-dictate-asr.json`). |
 | `/dictate add <name> <host[:port]\|url> [model]` | Add (or update) a server, saved to the config file. Model defaults to `lfm3-audio-2b`. |
 | `/dictate remove <name>` | Remove a server (the last one cannot be removed). |
@@ -70,6 +77,12 @@ With dictation on:
    the middle or at the end of text you already wrote.
 3. **Release Space.** The text is finalized and the caret finishes after it.
 4. **Esc** or **Ctrl+C** while holding cancels and removes what was typed.
+
+**Hands-free:** press **Ctrl+R** to start recording without holding anything, for example to switch
+to another window and read while you talk. The footer shows `● REC Ctrl+R or Enter to finish`. Come
+back and press **Ctrl+R** or **Enter** (Enter does not send the prompt) to finish; **Esc** cancels.
+Space types normally during a hands-free recording. Ctrl+R is not used by pi's prompt editor; it is
+only taken while dictation is on.
 
 ## Configuration
 
@@ -99,7 +112,8 @@ Without a config file there is one server, `local` at `http://localhost:8181` us
   is a release. The repeats are swallowed before the editor sees them, so the cursor does not move.
 - The one or two spaces typed before the hold is recognised are deleted again through the editor,
   so it works wherever the caret is.
-- Audio is recorded with `parecord` at 16 kHz mono and re-sent to the server about once a second as a
+- Audio is recorded (`parecord`, `arecord` or `sox`, chosen per platform in `src/recorder.ts`; adding a
+  tool or platform is one entry there) at 16 kHz mono and re-sent to the server about once a second as a
   growing WAV, so the text refines while you speak. Leading silence is trimmed to stop the model
   inventing words from room noise. Long dictation is committed in 40 second segments.
 - The words are inserted with the editor's own `insertTextAtCursor`; only the part that changed is
@@ -112,7 +126,8 @@ configuration that is `localhost`. Nothing is written to disk except the optiona
 
 ## Limitations
 
-- Linux with `parecord` only; not tested elsewhere.
+- Only Linux with `parecord` is tested here. The macOS and Windows `sox` paths are untested.
+- A hands-free recording keeps all its audio in memory (about 2 MB per minute) until you finish it.
 - Recording starts about half a second after Space goes down (the key-repeat delay), so a word
   spoken the instant you press is lost.
 - For the first half second of a hold, one or two spaces appear in the prompt and are then removed.
